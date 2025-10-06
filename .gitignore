@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+env/
+ENV/
+
+# FastAPI / local artifacts
+app.db
+uploads/
+static/
+
+# VS Code
+.vscode/
+
+# Secrets
+.env
