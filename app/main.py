@@ -1,39 +1,40 @@
-# FastAPI uygulamasının giriş noktası (route’lar burada)
-
+# app/main.py
+# FastAPI uygulamasının giriş noktası
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic_settings import BaseSettings
-from pydantic import BaseModel
 from typing import Optional, List
 from pathlib import Path
 from uuid import uuid4
 from datetime import datetime
-import shutil, time
+import shutil
+import time
+import json
+import base64
+import mimetypes
 
+import httpx
 from sqlmodel import select, Session
 
-from .db import init_db, get_session, BASE_DIR
+from .config import settings, BASE_DIR
+from .db import init_db, get_session
 from .models import Job
 from .schemas import JobOut, JobListItem
 
+# -------------------------------------------------------------------
+# Klasörler
+# -------------------------------------------------------------------
 UPLOAD_DIR = BASE_DIR / "uploads"
 STATIC_DIR = BASE_DIR / "static"
 UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
 STATIC_DIR.mkdir(exist_ok=True, parents=True)
 
-class Settings(BaseSettings):
-    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
-    FAL_API_KEY: Optional[str] = None
-    class Config:
-        env_file = BASE_DIR / ".env"
+# -------------------------------------------------------------------
+# FastAPI & CORS
+# -------------------------------------------------------------------
+app = FastAPI(title="AI Image Editor Backend", version="1.0.0")
 
-settings = Settings()
-
-app = FastAPI(title="AI Image Editor Backend", version="0.1.0")
-
-# CORS
 origins = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -43,28 +44,115 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# statik çıktı servisi
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.on_event("startup")
 def on_startup():
     init_db()
+    print(f"[FAL] model: {settings.FAL_MODEL}  endpoint: {settings.FAL_ENDPOINT}")
 
 @app.get("/health")
 def health():
     return {"ok": True, "time": datetime.utcnow().isoformat()}
 
-def _simulate_processing(src: Path, dst: Path) -> None:
-    """
-    Gerçek entegrasyon öncesi: kısa 'işleme' simülasyonu.
-    Burayı ileride fal.ai çağrısı ile değiştirirsin.
-    """
-    time.sleep(1.2)
-    shutil.copyfile(src, dst)
+# -------------------------------------------------------------------
+# Yardımcılar
+# -------------------------------------------------------------------
+def _image_to_data_url(image_path: Path) -> str:
+    """Yerel dosyayı base64 data-URL'e çevirir."""
+    mime, _ = mimetypes.guess_type(str(image_path))
+    if not mime:
+        mime = "application/octet-stream"
+    with open(image_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
 
-def _process_job(job_id: str, raw_path: Path, out_path: Path, session: Session):
+def _fal_infer_sync(model: str, image_path: Path, prompt: str) -> str:
+    """
+    fal.run'e bu modelin beklediği şekilde JSON body ile istek atar.
+    Giriş: {"prompt": "...", "image_urls": ["data:<mime>;base64,<...>"]}
+    Çıkış: {"images": [{"url": "..."}], ...}
+    """
+    if not settings.FAL_API_KEY:
+        raise RuntimeError("FAL_API_KEY is missing in .env")
+
+    endpoint = settings.FAL_ENDPOINT.rstrip("/")
+    url = f"{endpoint}/{model.lstrip('/')}"
+    headers = {
+        "Authorization": f"Key {settings.FAL_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    data_url = _image_to_data_url(image_path)
+    payload = {
+        "prompt": prompt,
+        "image_urls": [data_url],  # model top-level bekliyor
+    }
+
+    # TÜM istek ve polling bu bloğun İÇİNDE kalmalı
+    with httpx.Client(timeout=settings.FAL_TIMEOUT) as client:
+        r = client.post(url, headers=headers, json=payload)
+
+        if r.status_code == 200:
+            pp = r.json()
+            images = pp.get("images") or []
+            if images and isinstance(images[0], dict) and "url" in images[0]:
+                return images[0]["url"]
+            raise RuntimeError(f"no image url in response (200): {pp}")
+
+        if r.status_code == 202:
+            poll_url = r.headers.get("Location")
+            if not poll_url:
+                try:
+                    pp = r.json()
+                except Exception:
+                    raise RuntimeError(f"no poll url (202): {r.text[:300]}")
+                poll_url = pp.get("poll_url") or pp.get("status_url") or pp.get("result_url")
+            if not poll_url:
+                raise RuntimeError(f"no poll url (202): {r.text[:300]}")
+
+            waited = 0.0
+            while waited < settings.POLL_MAX_WAIT:
+                pr = client.get(poll_url, headers={"Authorization": f"Key {settings.FAL_API_KEY}"})
+                if pr.status_code not in (200, 202):
+                    raise RuntimeError(f"poll failed {pr.status_code}: {pr.text[:300]}")
+                pp = pr.json()
+
+                images = pp.get("images") or []
+                if images and isinstance(images[0], dict) and "url" in images[0]:
+                    return images[0]["url"]
+
+                status = (pp.get("status") or pp.get("state") or "").lower()
+                if status in ("failed", "error"):
+                    raise RuntimeError(f"fal job failed: {pp}")
+                if status in ("succeeded", "completed", "done", "success"):
+                    raise RuntimeError(f"completed but no image url: {pp}")
+
+                time.sleep(settings.POLL_INTERVAL)
+                waited += settings.POLL_INTERVAL
+
+            raise RuntimeError("fal polling timeout")
+
+        # 4xx/5xx
+        raise RuntimeError(f"fal error {r.status_code}: {r.text[:300]}")
+
+def _download_to_static(url: str, out_path: Path) -> None:
+    """Çıktı URL'sindeki resmi indirip static/ altına kaydeder (local geliştirme için)."""
+    with httpx.Client(timeout=settings.FAL_TIMEOUT) as client:
+        rr = client.get(url)
+        rr.raise_for_status()
+        with out_path.open("wb") as f:
+            f.write(rr.content)
+
+def _get_job_prompt(job_id: str, session: Session) -> str:
+    job = session.get(Job, job_id)
+    return job.prompt if job else ""
+
+def _process_job_with_fal(job_id: str, raw_path: Path, out_path: Path, session: Session):
     try:
-        _simulate_processing(raw_path, out_path)
+        result_url = _fal_infer_sync(settings.FAL_MODEL, raw_path, prompt=_get_job_prompt(job_id, session))
+        _download_to_static(result_url, out_path)
+
         job = session.get(Job, job_id)
         if job:
             job.status = "done"
@@ -81,6 +169,9 @@ def _process_job(job_id: str, raw_path: Path, out_path: Path, session: Session):
             session.add(job)
             session.commit()
 
+# -------------------------------------------------------------------
+# Routes
+# -------------------------------------------------------------------
 @app.post("/api/jobs", response_model=JobOut)
 async def create_job(
     background_tasks: BackgroundTasks,
@@ -90,6 +181,8 @@ async def create_job(
 ):
     if not image.filename:
         raise HTTPException(status_code=400, detail="No file name")
+    if not settings.FAL_API_KEY:
+        raise HTTPException(status_code=500, detail="FAL_API_KEY not set in .env")
 
     job_id = str(uuid4())
     suffix = Path(image.filename).suffix or ".png"
@@ -109,8 +202,7 @@ async def create_job(
     session.add(job)
     session.commit()
 
-    # arka planda işleme
-    background_tasks.add_task(_process_job, job_id, raw_path, out_path, session)
+    background_tasks.add_task(_process_job_with_fal, job_id, raw_path, out_path, session)
 
     return JobOut(
         job_id=job.id,

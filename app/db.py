@@ -1,17 +1,10 @@
-# Veritabanı motoru, oturum (Session) ve tablo oluşturma
-
+# app/db.py
 from sqlmodel import SQLModel, create_engine, Session
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
+from .config import settings, BASE_DIR
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-class Settings(BaseSettings):
-    DATABASE_URL: str = "sqlite:///./app.db"
-    class Config:
-        env_file = BASE_DIR / ".env"
-
-settings = Settings()
+#BASE_DIR = Path(__file__).resolve().parent.parent
 
 connect_args = {}
 if settings.DATABASE_URL.startswith("sqlite"):
