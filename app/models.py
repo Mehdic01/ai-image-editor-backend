@@ -12,8 +12,8 @@ class Job(SQLModel, table=True):
     error: Optional[str] = None
     raw_path: Optional[str] = None
     out_path: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
 
     # İleride model adı, parametreler vs. için alanlar açılabilir:
     model_name: Optional[str] = Field(default=None)  # örn: "seedream-v4"

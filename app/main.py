@@ -22,6 +22,10 @@ from .db import init_db, get_session
 from .models import Job
 from .schemas import JobOut, JobListItem
 
+from fastapi.responses import FileResponse, RedirectResponse
+from urllib.parse import urljoin
+from sqlalchemy import func
+
 # -------------------------------------------------------------------
 # Klasörler
 # -------------------------------------------------------------------
@@ -58,6 +62,17 @@ def health():
 # -------------------------------------------------------------------
 # Yardımcılar
 # -------------------------------------------------------------------
+def _safe_unlink(p: str | Path | None) -> None:
+    try:
+        if not p:
+            return
+        path = Path(p)
+        if path.exists():
+            path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _image_to_data_url(image_path: Path) -> str:
     """Yerel dosyayı base64 data-URL'e çevirir."""
     mime, _ = mimetypes.guess_type(str(image_path))
@@ -211,6 +226,7 @@ async def create_job(
         error=job.error,
         created_at=job.created_at,
         updated_at=job.updated_at,
+        prompt=job.prompt
     )
 
 @app.get("/api/jobs/{job_id}", response_model=JobOut)
@@ -225,12 +241,97 @@ def get_job(job_id: str, session: Session = Depends(get_session)):
         error=job.error,
         created_at=job.created_at,
         updated_at=job.updated_at,
+        prompt=job.prompt
     )
 
 @app.get("/api/jobs", response_model=List[JobListItem])
 def list_jobs(session: Session = Depends(get_session)):
     jobs = session.exec(select(Job).order_by(Job.created_at.desc())).all()
     return [
-        JobListItem(job_id=j.id, status=j.status, result_url=j.result_url, created_at=j.created_at)
+        JobListItem(job_id=j.id, status=j.status, result_url=j.result_url, created_at=j.created_at, prompt=j.prompt)
         for j in jobs
     ]
+
+#job silme endpointi(safe unlink ile dosyaları da siler)
+
+@app.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str, session: Session = Depends(get_session)):
+    job = session.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+        # dosyaları temizle
+    _safe_unlink(job.raw_path)
+    _safe_unlink(job.out_path)
+
+    session.delete(job)
+    session.commit()
+    return {"detail": "Job deleted"}
+
+
+# Sayfalama için endpoint (isteğe bağlı status filtresi ile)
+# frontend'in kolay tüketmesi için sade bir şema döndürüyor
+
+@app.get("/api/jobs/page")
+def list_jobs_paged(
+    page: int = 1,
+    page_size: int = 20,
+    status: Optional[str] = None,
+    session: Session = Depends(get_session),
+):
+    page = max(1, page)
+    page_size = min(max(1, page_size), 100)
+
+    query = select(Job).order_by(Job.created_at.desc())
+    count_query = select(func.count()).select_from(Job)
+
+    if status:
+        query = query.filter(Job.status == status)
+        count_query = count_query.filter(Job.status == status)
+
+    total = session.exec(count_query).one()
+    items = session.exec(query.offset((page - 1) * page_size).limit(page_size)).all()
+
+    # frontend'in kolay tüketmesi için sade bir şema döndürelim
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "items": [
+            {
+                "job_id": j.id,
+                "status": j.status,
+                "result_url": j.result_url,
+                "created_at": j.created_at,
+                "updated_at": j.updated_at,
+            }
+            for j in items
+        ],
+    }
+
+# Sonuç dosyasını indirme endpointi (redirect veya local dosya)
+
+@app.get("/api/jobs/{job_id}/download")
+def download_job_result(job_id: str, session: Session = Depends(get_session)):
+    job = session.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.result_url:
+        raise HTTPException(status_code=400, detail="Job has no result yet")
+
+    ru = job.result_url
+    # tam URL ise 
+    if ru.startswith("http://") or ru.startswith("https://"):
+        return RedirectResponse(url=ru)
+
+    # /static/xyz_out.png gibi ise 
+    if ru.startswith("/static/"):
+        filename = ru.split("/static/")[-1]
+        path = STATIC_DIR / filename
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Result file not found")
+        # indirme için filename set edelim
+        return FileResponse(path, filename=filename, media_type="application/octet-stream")
+
+    # bilinmeyen biçim — en kötü backend hostuna ekleyip yönlendirelim
+    return RedirectResponse(url=ru)

@@ -11,9 +11,11 @@ class JobOut(BaseModel):
     error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    prompt: str
 
 class JobListItem(BaseModel):
     job_id: str
     status: str
     result_url: Optional[str] = None
+    prompt: str
     created_at: datetime
