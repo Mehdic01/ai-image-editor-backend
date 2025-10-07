@@ -42,8 +42,9 @@ app = FastAPI(title="AI Image Editor Backend", version="1.0.0")
 origins = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins or ["*"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    #allow_origin_regex=settings.ALLOWED_ORIGIN_REGEX,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

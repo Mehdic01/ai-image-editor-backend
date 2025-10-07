@@ -10,6 +10,8 @@ class Settings(BaseSettings):
 
     # CORS
     ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # Allow any localhost/127.0.0.1 with any port (useful for Flutter/Vite dev servers)
+    ALLOWED_ORIGIN_REGEX: str | None = r"^https?://(localhost|127\\.0\\.0\\.1)(:\\d+)?$"
 
     # fal.ai
     FAL_API_KEY: str | None = None
