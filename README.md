@@ -208,4 +208,53 @@ Integration details (see `app/main.py`):
 - Reset local DB (will drop data): stop the server and delete `app.db`, then restart to re-create tables.
 
 
+## Implementation notes: AI‑assisted development (prompts & strategy)
+
+This project intentionally leveraged AI coding assistants to accelerate development while keeping changes reviewable and safe. Here is how they were used and the guardrails followed:
+
+### Tools used
+- AI assistants: Copilot/ChatGPT-style prompts within the editor.
+- Local runtime checks: uvicorn logs, simple curl requests, and browser DevTools (Network) for CORS and caching behavior.
+
+### Prompting and implementation strategy
+- Work in small, verifiable steps:
+	- Gather context first (read code, identify entry points and settings).
+	- Propose minimal edits with clear intent (e.g., “add allow_origin_regex for Flutter dev ports”).
+	- Apply concise patches instead of large refactors to preserve readability and git history.
+- Keep configuration centralized:
+	- All environment variables flow through `app/config.py` (typed `Settings` with defaults), values supplied via `.env` or deployment env.
+- Validate early:
+	- Run local server and hit `/health` after changes.
+	- Use `pip list` / `pip freeze` to pin dependencies in `requirement.txt`.
+	- Inspect logs and HTTP responses (e.g., 304 explanation for static cache validation).
+- Document as we go:
+	- Added `.env.example` for safe secrets management.
+	- Expanded README with setup, architecture, and deployment notes.
+
+### Example prompts (summarized)
+- “Diagnose Pydantic ValidationError extra_forbidden and align Settings with `.env` keys.”
+- “Make CORS friendly for Flutter’s random dev ports; prefer allow_origin_regex.”
+- “Add S3-compatible storage option so results persist on Render; return public URLs.”
+- “Generate requirements from the venv and populate requirement.txt.”
+- “Explain why a static file request returned 304 Not Modified.”
+
+### Guardrails and best practices
+- Secrets never committed:
+	- Real keys live in `.env` (local) or Render environment variables.
+	- `.env.example` documents required values without secrets.
+- Principle of least change:
+	- Minimal code edits, focused on specific outcomes (CORS fix, storage backend, README docs).
+- Production readiness considerations:
+	- SQLite only for local dev; prefer Postgres in production.
+	- Object storage (S3/R2) for persistent results; local `static/` only for dev.
+	- Restrict CORS in production to known frontend origins.
+- Human review:
+	- All generated code was reviewed and tested locally before considering deployment.
+
+### Limitations
+- AI suggestions can be confident but incomplete; every change was validated in a running app and adjusted when needed.
+- Background task/session lifecycle and error paths should be revisited if workload or scale increases (move to a worker/queue if necessary).
+
+
+
 
