@@ -4,6 +4,7 @@ from typing import Optional, List
 from pydantic import BaseModel
 from datetime import datetime
 
+# JobOut'un API yanıtı için şeması (örneğin /api/jobs, /api/jobs/{job_id})
 class JobOut(BaseModel):
     job_id: str
     status: str
@@ -13,6 +14,7 @@ class JobOut(BaseModel):
     updated_at: datetime
     prompt: str
 
+# JobListItem'ın API yanıtı için şeması (örneğin /api/jobs listesi)
 class JobListItem(BaseModel):
     job_id: str
     status: str

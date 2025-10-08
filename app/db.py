@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from .config import settings, BASE_DIR
 
-#BASE_DIR = Path(__file__).resolve().parent.parent
+# SQLite için özel bağlantı argümanları 
 
 connect_args = {}
 if settings.DATABASE_URL.startswith("sqlite"):

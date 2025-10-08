@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     # pydantic v2 settings
     model_config = SettingsConfigDict(
         env_file=str(BASE_DIR / ".env"),
-        extra="ignore",         # fazladan anahtar gelirse görmezden gel
-        case_sensitive=False,   # .env'de büyük/küçük farkı önemseme
+        extra="ignore",         # fazladan anahtar gelirse görmezden gelir
+        case_sensitive=False,   # .env'de büyük/küçük farkı önemsemez
     )
 
 settings = Settings()

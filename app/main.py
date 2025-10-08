@@ -43,7 +43,6 @@ origins = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    #allow_origin_regex=settings.ALLOWED_ORIGIN_REGEX,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -73,7 +72,9 @@ def _safe_unlink(p: str | Path | None) -> None:
     except Exception:
         pass
 
-
+# bu fonksiyon fal.run'e base64 data-URL formatında resim gönderiyor
+# (küçük resimler için uygun, büyük resimler için değil)    
+#*******************************************************************************************************
 def _image_to_data_url(image_path: Path) -> str:
     """Yerel dosyayı base64 data-URL'e çevirir."""
     mime, _ = mimetypes.guess_type(str(image_path))
@@ -83,6 +84,11 @@ def _image_to_data_url(image_path: Path) -> str:
         b64 = base64.b64encode(f.read()).decode("utf-8")
     return f"data:{mime};base64,{b64}"
 
+
+# bu fonksiyon fal.run'e istek atar ve sonucu bekler
+# ve hata durumlarını işler
+# POLLING vs SYNC (POLL_MAX_WAIT ile sınırlandırılmış ve POLL_INTERVAL ile bekleme aralığı ayarlanabilir)
+#*******************************************************************************************************
 def _fal_infer_sync(model: str, image_path: Path, prompt: str) -> str:
     """
     fal.run'e bu modelin beklediği şekilde JSON body ile istek atar.
@@ -105,7 +111,7 @@ def _fal_infer_sync(model: str, image_path: Path, prompt: str) -> str:
         "image_urls": [data_url],  # model top-level bekliyor
     }
 
-    # TÜM istek ve polling bu bloğun İÇİNDE kalmalı
+    # TÜM istek ve polling bu bloğun İÇİNDE gerçekleşiyor
     with httpx.Client(timeout=settings.FAL_TIMEOUT) as client:
         r = client.post(url, headers=headers, json=payload)
 
@@ -152,6 +158,8 @@ def _fal_infer_sync(model: str, image_path: Path, prompt: str) -> str:
         # 4xx/5xx
         raise RuntimeError(f"fal error {r.status_code}: {r.text[:300]}")
 
+# Bu fonksiyon verilen URL'den resmi indirip belirtilen çıkış yoluna kaydeder
+#*******************************************************************************************************
 def _download_to_static(url: str, out_path: Path) -> None:
     """Çıktı URL'sindeki resmi indirip static/ altına kaydeder (local geliştirme için)."""
     with httpx.Client(timeout=settings.FAL_TIMEOUT) as client:
@@ -160,10 +168,14 @@ def _download_to_static(url: str, out_path: Path) -> None:
         with out_path.open("wb") as f:
             f.write(rr.content)
 
+# Job tablosundan prompt'u alır
+#*******************************************************************************************************
 def _get_job_prompt(job_id: str, session: Session) -> str:
     job = session.get(Job, job_id)
     return job.prompt if job else ""
 
+# Bu fonksiyon arka planda çalışır, fal ile işleme yapar ve DB'yi günceller
+#*******************************************************************************************************
 def _process_job_with_fal(job_id: str, raw_path: Path, out_path: Path, session: Session):
     try:
         result_url = _fal_infer_sync(settings.FAL_MODEL, raw_path, prompt=_get_job_prompt(job_id, session))
@@ -188,6 +200,11 @@ def _process_job_with_fal(job_id: str, raw_path: Path, out_path: Path, session: 
 # -------------------------------------------------------------------
 # Routes
 # -------------------------------------------------------------------
+
+#-----------MAIN API ENDPOINT 1---------------------------------------------------------------
+#---------------------------------------------------------------------------------------------
+# Job oluşturma endpointi
+#*******************************************************************************************************
 @app.post("/api/jobs", response_model=JobOut)
 async def create_job(
     background_tasks: BackgroundTasks,
@@ -230,6 +247,10 @@ async def create_job(
         prompt=job.prompt
     )
 
+#-----------MAIN API ENDPOINT 2---------------------------------------------------------------
+#---------------------------------------------------------------------------------------------
+# Job detay endpointi (ID ile)
+#*******************************************************************************************************
 @app.get("/api/jobs/{job_id}", response_model=JobOut)
 def get_job(job_id: str, session: Session = Depends(get_session)):
     job = session.get(Job, job_id)
@@ -245,6 +266,11 @@ def get_job(job_id: str, session: Session = Depends(get_session)):
         prompt=job.prompt
     )
 
+
+#-----------MAIN API ENDPOINT 3---------------------------------------------------------------
+#---------------------------------------------------------------------------------------------
+# Tüm jobları listeleme endpointi (basit, sayfalama yok)
+#*******************************************************************************************************
 @app.get("/api/jobs", response_model=List[JobListItem])
 def list_jobs(session: Session = Depends(get_session)):
     jobs = session.exec(select(Job).order_by(Job.created_at.desc())).all()
@@ -253,8 +279,11 @@ def list_jobs(session: Session = Depends(get_session)):
         for j in jobs
     ]
 
-#job silme endpointi(safe unlink ile dosyaları da siler)
 
+#-----------ALTERNATIF API ENDPOINT---------------------------------------------------------------
+#---------------------------------------------------------------------------------------------
+# job silme endpointi (safe unlink ile dosyaları da siler)
+#*******************************************************************************************************
 @app.delete("/api/jobs/{job_id}")
 def delete_job(job_id: str, session: Session = Depends(get_session)):
     job = session.get(Job, job_id)
@@ -270,48 +299,10 @@ def delete_job(job_id: str, session: Session = Depends(get_session)):
     return {"detail": "Job deleted"}
 
 
-# Sayfalama için endpoint (isteğe bağlı status filtresi ile)
-# frontend'in kolay tüketmesi için sade bir şema döndürüyor
-
-@app.get("/api/jobs/page")
-def list_jobs_paged(
-    page: int = 1,
-    page_size: int = 20,
-    status: Optional[str] = None,
-    session: Session = Depends(get_session),
-):
-    page = max(1, page)
-    page_size = min(max(1, page_size), 100)
-
-    query = select(Job).order_by(Job.created_at.desc())
-    count_query = select(func.count()).select_from(Job)
-
-    if status:
-        query = query.filter(Job.status == status)
-        count_query = count_query.filter(Job.status == status)
-
-    total = session.exec(count_query).one()
-    items = session.exec(query.offset((page - 1) * page_size).limit(page_size)).all()
-
-    # frontend'in kolay tüketmesi için sade bir şema döndürelim
-    return {
-        "page": page,
-        "page_size": page_size,
-        "total": total,
-        "items": [
-            {
-                "job_id": j.id,
-                "status": j.status,
-                "result_url": j.result_url,
-                "created_at": j.created_at,
-                "updated_at": j.updated_at,
-            }
-            for j in items
-        ],
-    }
-
+#-----------ALTERNATIF API ENDPOINT---------------------------------------------------------------
+#---------------------------------------------------------------------------------------------
 # Sonuç dosyasını indirme endpointi (redirect veya local dosya)
-
+#*******************************************************************************************************
 @app.get("/api/jobs/{job_id}/download")
 def download_job_result(job_id: str, session: Session = Depends(get_session)):
     job = session.get(Job, job_id)
@@ -331,8 +322,8 @@ def download_job_result(job_id: str, session: Session = Depends(get_session)):
         path = STATIC_DIR / filename
         if not path.exists():
             raise HTTPException(status_code=404, detail="Result file not found")
-        # indirme için filename set edelim
+        # indirme için filename set edilir
         return FileResponse(path, filename=filename, media_type="application/octet-stream")
 
-    # bilinmeyen biçim — en kötü backend hostuna ekleyip yönlendirelim
+   
     return RedirectResponse(url=ru)
