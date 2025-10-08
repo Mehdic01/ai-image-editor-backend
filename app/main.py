@@ -161,12 +161,63 @@ def _fal_infer_sync(model: str, image_path: Path, prompt: str) -> str:
 # Bu fonksiyon verilen URL'den resmi indirip belirtilen çıkış yoluna kaydeder
 #*******************************************************************************************************
 def _download_to_static(url: str, out_path: Path) -> None:
-    """Çıktı URL'sindeki resmi indirip static/ altına kaydeder (local geliştirme için)."""
+    """Deprecated: use _store_result(url, out_path) instead."""
+    _store_result(url, out_path)
+
+def _store_result(url: str, out_path: Path) -> str:
+    """
+    Çıktı URL'ini indirir ve storage backend'e kaydeder.
+    - local: static/ altına yazar ve "/static/<file>" döner
+    - s3: configured bucket'a yükler ve public URL döner
+    """
     with httpx.Client(timeout=settings.FAL_TIMEOUT) as client:
         rr = client.get(url)
         rr.raise_for_status()
-        with out_path.open("wb") as f:
-            f.write(rr.content)
+        content = rr.content
+
+    if (settings.STORAGE_BACKEND or "local").lower() == "s3":
+        # Lazy import to avoid hard dependency in local dev
+        try:
+            import boto3  # type: ignore
+        except Exception as e:
+            raise RuntimeError("boto3 is required for S3 storage; install and set STORAGE_BACKEND=s3") from e
+
+        if not settings.S3_BUCKET:
+            raise RuntimeError("S3_BUCKET is required when STORAGE_BACKEND=s3")
+
+        key = f"results/{out_path.name}"
+        session_kwargs = {}
+        if settings.S3_REGION:
+            session_kwargs["region_name"] = settings.S3_REGION
+        s3_session = boto3.session.Session(**session_kwargs)
+        client_kwargs = {}
+        if settings.S3_ENDPOINT:
+            client_kwargs["endpoint_url"] = settings.S3_ENDPOINT
+        if settings.S3_ACCESS_KEY_ID and settings.S3_SECRET_ACCESS_KEY:
+            client_kwargs["aws_access_key_id"] = settings.S3_ACCESS_KEY_ID
+            client_kwargs["aws_secret_access_key"] = settings.S3_SECRET_ACCESS_KEY
+        s3 = s3_session.client("s3", **client_kwargs)
+        s3.put_object(Bucket=settings.S3_BUCKET, Key=key, Body=content, ContentType=mimetypes.guess_type(out_path.name)[0] or "application/octet-stream")
+
+        # Build a public URL
+        if settings.S3_PUBLIC_BASE_URL:
+            base = settings.S3_PUBLIC_BASE_URL.rstrip("/")
+            return f"{base}/{key}"
+        # Fallback to standard AWS S3 URL if region known
+        if settings.S3_REGION:
+            return f"https://{settings.S3_BUCKET}.s3.{settings.S3_REGION}.amazonaws.com/{key}"
+        # As a last resort, try endpoint URL
+        if settings.S3_ENDPOINT:
+            base = settings.S3_ENDPOINT.rstrip("/")
+            return f"{base}/{settings.S3_BUCKET}/{key}"
+        # If none available, we can't produce a public URL reliably
+        raise RuntimeError("Unable to construct S3 public URL; set S3_PUBLIC_BASE_URL or REGION/ENDPOINT")
+
+    # Default: local storage
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("wb") as f:
+        f.write(content)
+    return f"/static/{out_path.name}"
 
 # Job tablosundan prompt'u alır
 #*******************************************************************************************************
@@ -179,12 +230,12 @@ def _get_job_prompt(job_id: str, session: Session) -> str:
 def _process_job_with_fal(job_id: str, raw_path: Path, out_path: Path, session: Session):
     try:
         result_url = _fal_infer_sync(settings.FAL_MODEL, raw_path, prompt=_get_job_prompt(job_id, session))
-        _download_to_static(result_url, out_path)
+        public_url = _store_result(result_url, out_path)
 
         job = session.get(Job, job_id)
         if job:
             job.status = "done"
-            job.result_url = f"/static/{out_path.name}"
+            job.result_url = public_url
             job.updated_at = datetime.utcnow()
             session.add(job)
             session.commit()

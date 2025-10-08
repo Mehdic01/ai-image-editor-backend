@@ -21,6 +21,19 @@ class Settings(BaseSettings):
     POLL_INTERVAL: float = 1.5
     POLL_MAX_WAIT: int = 120
 
+    # Storage backend: "local" (default) or "s3" (for AWS S3 / R2 / S3-compatible)
+    STORAGE_BACKEND: str = "local"
+
+    # S3 configuration (used when STORAGE_BACKEND == "s3")
+    S3_BUCKET: str | None = None
+    S3_REGION: str | None = None
+    S3_ENDPOINT: str | None = None  # optional (useful for R2 or custom endpoints)
+    S3_ACCESS_KEY_ID: str | None = None
+    S3_SECRET_ACCESS_KEY: str | None = None
+    # Public base URL for serving objects (recommended for non-AWS like R2)
+    # Example: https://cdn.example.com/ or https://<accountid>.r2.cloudflarestorage.com/<bucket>/
+    S3_PUBLIC_BASE_URL: str | None = None
+
     # pydantic v2 settings
     model_config = SettingsConfigDict(
         env_file=str(BASE_DIR / ".env"),
